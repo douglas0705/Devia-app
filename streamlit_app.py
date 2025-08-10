@@ -6,7 +6,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 
-APP_TITLE = "FactureIA — Devis multi-métiers (MVP+)"
+APP_TITLE = "FactureIA — Devis multi-métiers (Couvreur avancé)"
 TVA_DEFAULT = 10
 
 # =========================
@@ -65,7 +65,7 @@ PRICES = {
 
         # --- Ouvertures / divers ---
         "depose_cheminee_forfait": {"label": "Dépose d'une cheminée + évacuation", "unit": "forfait", "unit_price": 600.0},  # +200 si grosse cheminée
-        "depose_fenetre_toit_fermeture_forfait": {"label": "Dépose fenêtre de toit + fermeture", "unit": "forfait", "unit_price": 500.0},
+        "depose_fenetre_toit_fermeture_forfait": {"label": "Dépose fenêtre de toit (Velux) + fermeture", "unit": "forfait", "unit_price": 500.0},
         "joint_etancheite_custom": {"label": "Joint d’étanchéité (à définir)", "unit": "forfait", "unit_price": 0.0},
 
         # --- Isolation & charpente ---
@@ -87,8 +87,184 @@ PRICES = {
 }
 
 # =========================
-#   HELPERS
+#   HELPERS & NLP
 # =========================
+
+FRENCH_QTY_WORDS = {"quinzaine":15,"douzaine":12,"dizaine":10,"quinze":15,"douze":12,"dix":10,"vingt":20}
+
+def num(s):
+    try: return float(s.replace(",", "."))
+    except: return None
+
+def qty_from_words(w):
+    return float(FRENCH_QTY_WORDS.get(w.lower().strip(), 0))
+
+def find_qty(text, unit_kind):
+    """
+    unit_kind in {"ml","m2","u","forfait"}
+    """
+    if unit_kind == "ml":
+        m = re.search(r"(\d+[,.]?\d*)\s*(?:m|ml|m(?:è|e)tre?s?\s*lin(?:é|e)aires?)", text)
+        return num(m.group(1)) if m else 0.0
+    if unit_kind == "m2":
+        m = re.search(r"(\d+[,.]?\d*)\s*(?:m2|m²|m\^?2|m(?:è|e)tre?s?\s*carr(?:é|e)s?)", text)
+        return num(m.group(1)) if m else 0.0
+    if unit_kind == "u":
+        m = re.search(r"(\d+)\s*(?:u|unit(?:é|e)s?|tuiles?|chevrons?)", text)
+        if m: return float(m.group(1))
+        m2 = re.search(r"(?:une?\s+)?([a-zéèêîïç]+)\s+(?:de\s+)?(?:tuiles?|chevrons?)", text)
+        if m2: return qty_from_words(m2.group(1))
+        return 0.0
+    return 1.0  # forfait par défaut
+
+def add_line(lines, key, qty, meta=None):
+    cfg = PRICES["couvreur"][key]
+    ln = {"key": key, "label": cfg["label"], "unit": cfg["unit"], "unit_price": cfg["unit_price"], "qty": float(qty)}
+    if meta:
+        ln.update(meta)
+    lines.append(ln)
+
+def extract_couvreur_from_text_advanced(text: str):
+    """
+    Détecte les prestations couvreur sur un texte libre (français).
+    Couvre tout le catalogue défini plus haut.
+    """
+    txt = text.lower()
+
+    lines = []
+
+    # --- Nettoyage ---
+    if re.search(r"\btraitement\b.*toiture|\btraiter\b.*toiture", txt):
+        add_line(lines, "nettoyage_toiture_traitement", find_qty(txt, "m2") or 0)
+    if re.search(r"\bhydrofuge\b(?!.*color)", txt) or re.search(r"imperm(?:é|e)abilis", txt):
+        add_line(lines, "nettoyage_toiture_hydrofuge", find_qty(txt, "m2") or 0)
+    if re.search(r"\bhydrofuge\s+color(é|e)", txt):
+        add_line(lines, "nettoyage_toiture_hydrofuge_colore", find_qty(txt, "m2") or 0)
+
+    # --- Faîtage & rives ---
+    if re.search(r"d(é|e)molition.*fa[iî]tage.*ma(ç|c)onn", txt):
+        add_line(lines, "demolition_faitage_maconne_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"d(é|e)pose.*fa[iî]tage.*(sec|syst(è|e)me\s+sec)", txt):
+        add_line(lines, "depose_faitage_sec_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"(mise\s+en\s+place|pose).*(fa[iî]tage).*(sec|syst(è|e)me\s+sec)", txt):
+        add_line(lines, "mise_en_place_faitage_sec_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"ch(a|â)ssis.*(sapin|bois)", txt):
+        add_line(lines, "chassis_bois_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"\bragr(é|e)age\b.*fa[iî]tage", txt):
+        add_line(lines, "ragreage_faitage_maconne_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"\bragr(é|e)age\b.*rives?", txt):
+        add_line(lines, "ragreage_rives_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"(rives?|rive)\b.*(poser|pose|mise\s+en\s+place)", txt) or re.search(r"\bpose\s+de\s+rives?", txt):
+        add_line(lines, "pose_rives_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"r(é|e)sine.*hydrofuge.*fa[iî]tage", txt):
+        add_line(lines, "resine_hydrofuge_faitage_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"r(é|e)sine.*hydrofuge.*rives?", txt):
+        add_line(lines, "resine_hydrofuge_rives_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"fa[iî]tage.*(ma(ç|c)onn(é|e)|ancien|ancienne)", txt):
+        add_line(lines, "realisation_faitage_maconne_ml", find_qty(txt, "ml") or 0)
+
+    # --- Toiture complète ---
+    if re.search(r"d(é|e)pose.*toiture", txt):
+        add_line(lines, "depose_toiture_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"(liteau|liteaux).*(contre[-\s]?liteau|contre[-\s]?liteaux)|mise\s+en\s+place\s+des?\s+liteaux", txt):
+        add_line(lines, "pose_liteaux_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"(é|e)cran\s+sous\s+toiture|hpv|sous[-\s]?toiture", txt):
+        add_line(lines, "pose_ecran_sous_toiture_m2", find_qty(txt, "m2") or 0)
+
+    # --- Pose tuiles (types) ---
+    m2_qty = find_qty(txt, "m2") or 0
+    if re.search(r"pose.*tuiles?.*dc\s*12|dc12", txt): add_line(lines, "pose_tuile_dc12_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*canal\s*s", txt): add_line(lines, "pose_tuile_canal_s_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*canal(?!\s*s)", txt): add_line(lines, "pose_tuile_canal_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*plain\s*ciel", txt): add_line(lines, "pose_tuile_plain_ciel_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*g13|gothique", txt): add_line(lines, "pose_tuile_g13_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*roman(e|es?)", txt): add_line(lines, "pose_tuile_romane_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*m(é|e)ridion(al|aux|ale|ales)", txt): add_line(lines, "pose_tuile_meridional_m2", m2_qty)
+    if re.search(r"pose.*tuiles?.*redland", txt): add_line(lines, "pose_tuile_redland_m2", m2_qty)
+
+    # --- Tuiles cassées ---
+    if re.search(r"(changer|remplacer)\s+(\d+|\w+)\s+tuil", txt):
+        qty = find_qty(txt, "u")
+        add_line(lines, "remplacement_tuiles_cassees_u", qty or 0)
+
+    # --- Zinguerie ---
+    if re.search(r"goutti(è|e)res?.*alu.*g\s*300|g300", txt):
+        add_line(lines, "gouttiere_alu_g300_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"goutti(è|e)res?.*zinc", txt):
+        add_line(lines, "gouttiere_zinc_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"d(é|e)pose.*goutti(è|e)res?", txt):
+        add_line(lines, "depose_gouttieres_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"entourage.*chemin(é|e)e", txt) and not re.search(r"d(é|e)pose.*entourage", txt):
+        add_line(lines, "entourage_cheminee_forfait", 1)
+    if re.search(r"d(é|e)pose.*entourage.*chemin(é|e)e", txt):
+        add_line(lines, "depose_entourage_cheminee_forfait", 1)
+
+    if re.search(r"\bnoues?\b", txt):
+        add_line(lines, "noue_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"couloirs?.*zinc", txt):
+        add_line(lines, "couloir_zinc_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"\bsolins?\b", txt):
+        add_line(lines, "solin_zinc_alu_ml", find_qty(txt, "ml") or 0)
+
+    # --- Habillage & bois ---
+    if re.search(r"avant[-\s]?toit.*pvc|sous[-\s]?face.*pvc|cache[-\s]?moineaux.*pvc", txt):
+        add_line(lines, "avant_toit_pvc_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"habillage.*planche.*rive.*pvc", txt):
+        add_line(lines, "habillage_planche_rive_pvc_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"habillage.*planche.*rive.*alu|minium", txt):
+        add_line(lines, "habillage_planche_rive_alu_ml", find_qty(txt, "ml") or 0)
+    if re.search(r"\bpdr\b.*bois|pi(è|e)ce.*bois.*rive", txt):
+        add_line(lines, "pose_pdr_bois_ml", find_qty(txt, "ml") or 0)
+
+    if re.search(r"(changer|remplacer)\s+(\d+|\w+)\s+chevrons?", txt):
+        qty = find_qty(txt, "u")
+        add_line(lines, "remplacement_chevron_u", qty or 0)
+
+    # --- Ouvertures / divers ---
+    if re.search(r"d(é|e)pose.*(chemin(é|e)e)", txt):
+        # prix ajusté ensuite par switch "grosse cheminée"
+        add_line(lines, "depose_cheminee_forfait", 1)
+    if re.search(r"d(é|e)pose.*(fen(ê|e)tre\s+de\s+toit|velux).*(fermeture|rebouchage)?", txt):
+        add_line(lines, "depose_fenetre_toit_fermeture_forfait", 1)
+
+    if re.search(r"joint.*(étanch|etanch)", txt):
+        add_line(lines, "joint_etancheite_custom", 1)
+
+    # --- Isolation & charpente ---
+    if re.search(r"isolation.*laine.*roche", txt):
+        add_line(lines, "isolation_laine_roche_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"isolation.*laine.*verre", txt):
+        add_line(lines, "isolation_laine_verre_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"isolation.*ouate", txt):
+        add_line(lines, "isolation_ouate_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"(é|e)vacuation.*ancienne.*isolation", txt):
+        add_line(lines, "evacuation_ancienne_isolation_m2", find_qty(txt, "m2") or 0)
+    if re.search(r"traitement.*charpente", txt):
+        add_line(lines, "traitement_charpente_m2", find_qty(txt, "m2") or 0)
+
+    # --- Cas générique faîtage à sec (phrase courte) ---
+    # "15 ml de faîtage à refaire à sec" → kit dépose + mise en place + châssis
+    m = re.search(r"(\d+[,.]?\d*)\s*(?:m|ml|m(?:è|e)tre?s?)\s+.*fa[iî]tage.*(sec|syst(è|e)me\s+sec)", txt)
+    if m and not any(ln["key"] in {"depose_faitage_sec_ml","mise_en_place_faitage_sec_ml","chassis_bois_ml"} for ln in lines):
+        qty_ml = float(m.group(1).replace(",", "."))
+        add_line(lines, "depose_faitage_sec_ml", qty_ml)
+        add_line(lines, "mise_en_place_faitage_sec_ml", qty_ml)
+        add_line(lines, "chassis_bois_ml", qty_ml)
+
+    # Nettoyage → si aucune ligne m² n'a été trouvée mais on mentionne "nettoyage/hydrofuge"
+    if not any(l["unit"]=="m²" and l["qty"]>0 for l in lines):
+        if re.search(r"nettoyage|hydrofuge|traitement\s+toiture", txt):
+            # si l'utilisateur n'a pas mis la surface, on laisse 0 (il ajustera)
+            pass
+
+    # Tuiles → si "changer tuiles" sans nombre, laisse 0 pour que l'artisan ajuste
+    return lines
+
 def compute_totals(lines, tva_rate):
     subtotal = round(sum(ln["qty"] * ln["unit_price"] for ln in lines), 2)
     tva = round(subtotal * (tva_rate / 100.0), 2)
@@ -175,61 +351,32 @@ def apply_business_rules(metier, lines, grosse_cheminee=False):
             "qty": 1, "unit": "forfait", "unit_price": 0.0
         })
 
-    # 1) Copier les lignes saisies
+    # 1) Copier les lignes saisies/détectées
     out.extend(lines)
 
     if metier == "couvreur":
         # 2) Si nettoyage présent → tuiles cassées = 0 €
         has_cleaning = any(ln.get("key","").startswith("nettoyage_toiture_") for ln in lines)
         for ln in out:
-            if ln.get("key") == "remplacement_tuiles_cassees_u":
-                if has_cleaning:
-                    ln["unit_price"] = 0.0
+            if ln.get("key") == "remplacement_tuiles_cassees_u" and has_cleaning:
+                ln["unit_price"] = 0.0
 
         # 3) Switch grosse cheminée (+200€)
         if grosse_cheminee:
             for ln in out:
                 if ln.get("key") == "depose_cheminee_forfait":
-                    ln["unit_price"] = 800.0
+                    ln["unit_price"] = 800.0  # sinon 600 par défaut
 
     return out
-
-# Extraction texte (simplifiée pour couvreur)
-def extract_couvreur_from_text(text: str):
-    txt = text.lower()
-    lines = []
-
-    # faîtage (ml)
-    m = re.search(r"(\d+[,.]?\d*)\s*(?:m|ml|m(?:è|e)tre?s?)\s+.*fa[iî]tage", txt)
-    if m:
-        qty_ml = float(m.group(1).replace(",", "."))
-        lines.append({"key":"depose_faitage_sec_ml", **PRICES["couvreur"]["depose_faitage_sec_ml"], "qty": qty_ml})
-        lines.append({"key":"mise_en_place_faitage_sec_ml", **PRICES["couvreur"]["mise_en_place_faitage_sec_ml"], "qty": qty_ml})
-        lines.append({"key":"chassis_bois_ml", **PRICES["couvreur"]["chassis_bois_ml"], "qty": qty_ml})
-
-    # tuiles (u)
-    qty_tiles = 0
-    m_tiles_num = re.search(r"(?:changer|remplacer)\s+(\d+)\s*tuil", txt)
-    if m_tiles_num:
-        qty_tiles = int(m_tiles_num.group(1))
-    else:
-        m_tiles_word = re.search(r"(?:changer|remplacer)\s+une?\s+([a-zéèêîïç]+)\s+de\s+tuil", txt)
-        FRENCH_QTY = {"quinzaine":15,"douzaine":12,"dizaine":10,"quinze":15,"douze":12,"dix":10,"vingt":20}
-        if m_tiles_word and m_tiles_word.group(1) in FRENCH_QTY:
-            qty_tiles = FRENCH_QTY[m_tiles_word.group(1)]
-    if qty_tiles > 0:
-        lines.append({"key":"remplacement_tuiles_cassees_u", "label":"Remplacement tuiles cassées", "unit":"u", "unit_price":13.0, "qty": qty_tiles})
-
-    return lines
 
 # =========================
 #   APP UI
 # =========================
 st.set_page_config(page_title=APP_TITLE, page_icon="🧾")
 st.title(APP_TITLE)
-st.caption("Choisis un métier, ajoute des postes du catalogue (ou via texte pour Couvreur), complète avec une ligne manuelle, puis génère le PDF.")
+st.caption("Écris tes travaux en français : l’app détecte toutes les prestations Couvreur, applique les règles, et génère le PDF. Multi-métiers prêt pour la suite.")
 
-# Choix du métier
+# Choix du métier (Couvreur actif pour l’IA, les autres arrivent)
 metier = st.selectbox("Choisir le métier :", ["couvreur","maconnerie","placo","elagage","carreleur"])
 
 # Infos société / client
@@ -242,21 +389,31 @@ with colB:
     client_name = st.text_input("Nom du client", value="Mme BLANC")
     client_addr = st.text_input("Adresse client", value="")
 
-# Saisie texte (activée surtout pour couvreur pour l'instant)
-st.subheader("Demande (texte libre) – optionnel")
-placeholder = "Ex: Refaire 15 ml de faîtage à sec et changer une quinzaine de tuiles." if metier=="couvreur" else "Ex: décrire ici votre besoin."
-user_text = st.text_area("Décris les travaux :", value=placeholder, height=90)
+# Saisie texte (l’IA couvreur avancée)
+st.subheader("Demande (texte libre)")
+placeholder = (
+    "Exemples :\n"
+    "- Nettoyage toiture 120 m² avec hydrofuge coloré\n"
+    "- Démolition faîtage maçonné 18 ml + pose faîtage à sec 18 ml + châssis sapin\n"
+    "- Gouttières alu G300 22 ml + dépose anciennes 22 ml\n"
+    "- Isolation laine de roche 60 m² + évacuation ancienne isolation 60 m²\n"
+    "- Dépose cheminée + fermeture, pose noue 6 ml, solin zinc 8 ml\n"
+    "- Habillage planche de rive PVC 15 ml, avant-toit PVC 20 m²\n"
+    "- Remplacer 12 tuiles, traitement charpente 80 m²"
+)
+user_text = st.text_area("Décris les travaux :", value=placeholder, height=160)
 
+# Lignes détectées
 auto_lines = []
 if metier == "couvreur" and user_text.strip():
-    auto_lines = extract_couvreur_from_text(user_text)
+    auto_lines = extract_couvreur_from_text_advanced(user_text)
 
-# Sélection catalogue
-st.subheader("Catalogue — ajouter des postes")
+# Catalogue manuel (si tu veux compléter)
+st.subheader("Catalogue — ajouter des postes (optionnel)")
 with st.expander("➕ Ajouter depuis le catalogue"):
     if PRICES.get(metier):
         key_list = list(PRICES[metier].keys())
-        show = st.multiselect("Choisis un ou plusieurs postes à ajouter :", options=key_list, format_func=lambda k: PRICES[metier][k]["label"])
+        show = st.multiselect("Choisis des postes à ajouter :", options=key_list, format_func=lambda k: PRICES[metier][k]["label"])
         added = []
         for k in show:
             cfg = PRICES[metier][k]
@@ -287,7 +444,7 @@ if manual_submit and label and qty > 0:
 
 # Options
 st.subheader("Options & TVA")
-grosse_cheminee = st.checkbox("Grosse cheminée (avec fermeture) → 800 € (couvreur)", value=False) if metier=="couvreur" else False
+grosse_cheminee = st.checkbox("Grosse cheminée (avec fermeture) → 800 €", value=False) if metier=="couvreur" else False
 tva_rate = st.slider("TVA (%)", min_value=0, max_value=20, value=TVA_DEFAULT, step=1)
 devis_num = st.text_input("N° de devis", value=f"D{date.today().strftime('%Y%m%d')}-001")
 conditions = st.text_area("Conditions (bas de page PDF)", value=(
@@ -299,8 +456,7 @@ conditions = st.text_area("Conditions (bas de page PDF)", value=(
 # Construire les lignes
 lines = []
 lines.extend(auto_lines)
-if 'added' in locals():
-    lines.extend(added)
+if 'added' in locals(): lines.extend(added)
 lines.extend(manual_lines)
 
 # Appliquer règles
@@ -317,7 +473,7 @@ if lines:
 # PDF
 if st.button("Générer le PDF"):
     if not lines:
-        st.warning("Ajoute au moins une ligne (catalogue, texte ou manuelle).")
+        st.warning("Ajoute au moins une ligne (texte, catalogue ou manuelle).")
     else:
         subtotal, tva, total = compute_totals(lines, tva_rate)
         pdf = make_pdf_devis(
@@ -334,4 +490,4 @@ if st.button("Générer le PDF"):
         )
         st.download_button("⬇️ Télécharger le devis (PDF)", data=pdf, file_name=f"{devis_num}.pdf", mime="application/pdf")
 else:
-    st.caption("Tip: choisis le métier, ajoute des postes du catalogue (ou écris une phrase pour Couvreur), complète en ligne manuelle, puis génère le PDF.")
+    st.caption("Astuce : écris tout en une phrase (exemples au-dessus). L’IA ajoute les bonnes lignes. Tu peux compléter avec le catalogue ou une ligne manuelle.")
